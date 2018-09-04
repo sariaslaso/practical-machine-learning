@@ -1,0 +1,265 @@
+---
+    title: "Human Activity Recognition"
+    author: "Susana Arias Laso"
+    output: html_document
+---
+
+## Introduction
+
+The goal of this project is to implement a machine learning algorithm to
+predict how well a particular exercise was performed using data collected
+at different locations of an accelerometer. The "classe" feature in the
+dataset indicates the manner in which the exercise was done. Class A indicates
+that the exercise was performed exactly according to the specification, while
+the other four classes indicate some common mistake. Using accelerometers 
+located on the belt, forearm, arm and dumbbell as recording devices, data from 
+6 participants was collected in order to quantify how well a particular 
+activity was done.
+
+The following libraries are needed to run the code. 
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(caret)
+library(ggplot2)
+library(dplyr)
+library(magrittr)
+library(tidyr)
+library(doMC)
+
+library(GGally)
+```
+
+Additionally, a seed is set before processing the data so the results can be 
+easily reproduced.
+```{r, echo=TRUE}
+set.seed(2195324)
+```
+
+In order to save running time when implementing the prediction model, parallel 
+processing is applied using half of the cores available.
+```{r, echo=TRUE}
+numCores <- detectCores()
+registerDoMC(numCores / 2)
+```
+
+## Data Processing
+
+```{r, echo=TRUE}
+train_url = 
+    'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+if (!file.exists("training.csv")) {
+    download.file(url = train_url, destfile = 'training.csv')
+}
+```
+
+Some missing entries in the dataset were identified and considered "NA" values
+before processing the data into training and test sets.
+
+```{r, echo=TRUE}
+training_data = read.csv(file = 'training.csv', 
+                         na.strings = c("NA", "", "#DIV/0!"))
+```
+
+In order to deal with the missing values, a boolean vector with the number of 
+elements corresponding to the number of features in the dataset was created. 
+Each component in the vector corresponds to the total number of NA values of a
+particular feature.
+
+```{r, echo=TRUE}
+na_col <- function(column_indx){
+    sum(is.na(training_data[, column_indx]))
+}
+
+boolean <- function(indx){
+    na_vector[indx] == 0
+}
+```
+
+```{r, echo=TRUE}
+indx_vector = 1:ncol(training_data)
+na_vector = sapply(indx_vector, na_col)
+boolean_vector = sapply(indx_vector, boolean)
+```
+
+The dataset in then evaluated on that boolean vector in order to keep only the
+features without missing values.
+```{r, echo=TRUE}
+data = training_data[, boolean_vector]
+```
+
+As features of interest for the prediction model we will keep only the 
+variables that contain the original sensor readings. This corresponds to 
+selecting the features that contain the Euler angles (roll, pitch and yaw)
+and the 3-axis coordinates of the accelerometer, gyroscope, and magnetometer
+readings for each sensor. 
+
+```{r, echo=TRUE, warning=FALSE}
+data <- data %>%
+    select(-contains("user"), -contains("timestamp"), -contains("window"), 
+           -contains("total")) %>%
+    select(-starts_with("X")) %>%
+    mutate("classe" = as.factor(classe))
+```
+
+The data is then separated into training and test sets, using 70% of the
+dataset to train the model.
+```{r, echo=TRUE}
+inTrain = createDataPartition(y = data$classe, p = 0.7, list = FALSE)
+training = data[inTrain, ]
+testing = data[-inTrain, ]
+```
+
+## Exploratory Data Analysis
+Using the GGally library the correlation among the arm Euler angles is 
+explored. 
+```{r, echo=TRUE}
+data_pairs <- select(training,
+                     contains("roll_arm"), 
+                     contains("pitch_arm"), 
+                     contains("yaw_arm"), 
+                     contains("classe"))
+```
+
+```{r, echo=TRUE}
+ggallyDensityPlot <- function(data, mapping, ...){
+    ggplot(data = data, mapping = mapping) + 
+    geom_density(mapping = aes_string(color = "classe"), fill = NA)
+}
+
+ggpairs(data_pairs, columns = c(1:3), 
+        mapping = ggplot2::aes(colour = classe),
+        lower = list(continuous = wrap("points", alpha = 0.5)),
+        diag = list(continuous = ggallyDensityPlot),
+        title = 'Correlation among arm Euler angles' 
+        )
+```
+
+No direct correlation is evident among these features, as one can notice in the
+lower diagonal plots. The density plots suggest that the observations follow
+a Gaussian distribution.
+
+## Prediction Model
+
+A random forest model was trained in order to predict how well each exercise
+was performed, i.e., the "classe" variable. A 10-fold cross validation of the 
+model was implemented, using a tuning parameter of tuneLength = 8 which 
+indicates the number of values to try for each hyperparameter. The process of 
+running the model took about 40 minutes.
+
+```{r, echo=TRUE}
+rf_file = "./rf10foldCV.rds"
+
+if (file.exists(rf_file)){
+    rf10fold_cv <- readRDS("./rf10foldCV.rds")
+} else {
+    rf10fold_cv <- train(classe ~ ., data = training, 
+                    method = 'rf', prox = TRUE, 
+                    trControl = trainControl(method = "cv", number = 10), 
+                    tuneLength = 8)
+}
+```
+
+The predictions of the model are evaluated on the test set, and shown in the
+form of an accuracy table, where the number of cases predicted correctly are
+indicated along the diagonal.
+
+```{r, echo=TRUE}
+pred <- predict(rf10fold_cv, testing)
+accuracy_table <- table(pred, testing$classe)
+accuracy_table
+```
+
+The model was 99.5% accurate on the test set, which indicates it will predict
+the feature "classe" with highly enough precision on unseen data.
+```{r, echo=TRUE}
+confusionMatrix(pred, testing$classe)$overall[1]
+```
+
+The precision with which each class was predicted is listed below.
+```{r, echo=TRUE}
+acc <- function(index){
+    accuracy_table[index, index] / sum(accuracy_table[, index])
+}
+
+classes <- c(1:5)
+pred_by_class <- sapply(classes, acc)
+
+for (i in seq(classes)) {
+    cat("Class", classes[i], "precision: ", pred_by_class[i], "\n")
+}
+```
+
+## Prediction Quiz
+
+The following code applied the machine learning algorithm from the previous
+section on 20 different cases available in the testing data. The predictions
+are printed below.
+
+```{r, echo=TRUE}
+test_url = 
+    'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+
+if (!file.exists("test.csv")) {
+    download.file(url = test_url, destfile = 'test.csv')
+}
+
+test_data = read.csv(file = 'test.csv', na.strings = c("NA", "", "#DIV/0!"))
+```
+
+```{r, echo=TRUE}
+rf_predictions <- predict(rf10fold_cv, newdata = test_data)
+rf_predictions
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
